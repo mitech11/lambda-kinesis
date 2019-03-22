@@ -2,9 +2,7 @@ package com.practice.lambda;
 
 import com.amazonaws.services.kinesis.AmazonKinesis;
 import com.amazonaws.services.kinesis.AmazonKinesisClientBuilder;
-import com.amazonaws.services.kinesis.model.PutRecordsRequest;
-import com.amazonaws.services.kinesis.model.PutRecordsRequestEntry;
-import com.amazonaws.services.kinesis.model.PutRecordsResult;
+import com.amazonaws.services.kinesis.model.*;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.LambdaLogger;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
@@ -47,6 +45,7 @@ public class S3EventToKinesisHandler implements RequestHandler<S3Event, String> 
 
     private ObjectMapper mapper = new ObjectMapper();
 
+    private int shardSize;
     final private RateLimiter rateLimiter = RateLimiter.create(1.0);
 
 
@@ -61,10 +60,12 @@ public class S3EventToKinesisHandler implements RequestHandler<S3Event, String> 
         assert !properties.isEmpty() : "Missing properties";
         queue = new ArrayBlockingQueue<>(Integer.parseInt(properties.getProperty("app.batch.queue.capacity", "200")));
         service = Executors.newFixedThreadPool(5);
+        shardSize = Integer.parseInt(properties.getProperty("app.batch.shard.size", "2"));
 
         kinesisClient = AmazonKinesisClientBuilder.defaultClient();
         assert kinesisClient != null && kinesisClient.describeStream(properties.getProperty("app.stream.name")).getStreamDescription().getStreamStatus().equalsIgnoreCase("active");
         s3Client = AmazonS3ClientBuilder.defaultClient();
+        shardSize = Integer.parseInt(properties.getProperty("app.batch.shard.size", "2"));
     }
 
     @Override
@@ -75,6 +76,7 @@ public class S3EventToKinesisHandler implements RequestHandler<S3Event, String> 
             assert retryBucketName != null : "Retry bucket name is missing";
 
             String partitionKey = properties.getProperty("app.stream.partition.key");
+
             assert partitionKey != null : "Partition column missing";
 
             logger = context.getLogger();
@@ -92,7 +94,7 @@ public class S3EventToKinesisHandler implements RequestHandler<S3Event, String> 
 
             logger.log("Read from bucket: " + bucketName + " and file: " + fileName);
             try {
-                processS3(partitionKey, bucketName, fileName);
+                processS3(bucketName, fileName);
                 kinesisWrite();
                 service.shutdown();
             /*while (service.isTerminated()) {
@@ -130,9 +132,39 @@ public class S3EventToKinesisHandler implements RequestHandler<S3Event, String> 
 
     }
 
+    private void processS3(String bucketName, String fileName) {
+
+        service.execute(() -> {
+            logger.log("in s3 read - Mitesh");
+            S3Object response = s3Client.getObject(new GetObjectRequest(bucketName, fileName));
+            S3ObjectInputStream inputStream = response.getObjectContent();
+
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
+                String line;
+                int partitionNum = 0;
+                while ((line = reader.readLine()) != null) {
+                    addRecord(partitionNum, line);
+                    partitionNum++;
+                    partitionNum = partitionNum < shardSize ? partitionNum : 0;
+                }
+                logger.log("file read done");
+                done = true;
+            } catch (Exception e) {
+                logger.log("Failed to read file: " + e);
+            }
+        });
+
+    }
+
     private void addRecord(String partitionKey, String line) throws IOException, InterruptedException {
         HashMap<String, Object> record = mapper.readValue(line, typeRef);
         String partitionValue = record.getOrDefault(partitionKey, new Random().nextInt()).toString();
+        PutRecordsRequestEntry putRecordRequest = createPutRecordsRequestEntry(line, partitionValue);
+        queue.put(putRecordRequest);
+    }
+
+    private void addRecord(int partitionNum, String line) throws InterruptedException {
+        String partitionValue = Integer.toString(partitionNum);
         PutRecordsRequestEntry putRecordRequest = createPutRecordsRequestEntry(line, partitionValue);
         queue.put(putRecordRequest);
     }
@@ -146,27 +178,17 @@ public class S3EventToKinesisHandler implements RequestHandler<S3Event, String> 
         int batchSize = Integer.parseInt(properties.getProperty("app.batch.size", "100"));
         List<PutRecordsRequestEntry> entries = new ArrayList<>();
 
-        RateLimiter rateLimiter = RateLimiter.create(8.0);
-        rateLimiter.setRate(8.0);
-        int counter = 1;
+        double permits = (shardSize * 1000) / batchSize;
+        RateLimiter rateLimiter = RateLimiter.create(permits);
+        rateLimiter.setRate(permits - 1); //reducing permits for safety
+        logger.log("The number of permits is " + permits);
         while (!done || !queue.isEmpty()) {
-          //  long diff = (System.currentTimeMillis() - startTime) / 1000;
             PutRecordsRequestEntry requestEntry = queue.take();
             entries.add(requestEntry);
             if (entries.size() >= batchSize) {
-                /*if (diff > 1 || counter <= callPerSecond) {
-                    executeRequest(streamName, entries);
-                    entries.clear();
-                    counter++;
-                } else {
-                    Thread.sleep(1000);
-                    counter = 1;
-                }
-                startTime = System.currentTimeMillis();*/
                 rateLimiter.acquire(1);
                 executeRequest(streamName, entries);
                 entries.clear();
-                logger.log("put records job submitted");
             }
         }
         logger.log("its not coming here");
@@ -179,24 +201,49 @@ public class S3EventToKinesisHandler implements RequestHandler<S3Event, String> 
         logger.log("aync job submitted");
     }
 
-    private void executeRequest(String streamName, List<PutRecordsRequestEntry> entries) {
+    private PutRecordsResult executeRequest(String streamName, List<PutRecordsRequestEntry> entries) {
+        PutRecordsResult putRecordsResult = new PutRecordsResult();
         try {
-            logger.log("Execute put records request");
+//            logger.log("Execute put records request");
             PutRecordsRequest request = new PutRecordsRequest();
             request.withRecords(entries);
             request.withStreamName(streamName);
             logger.log("streamName: " + streamName + "and records size: " + entries.size());
-            PutRecordsResult putRecordsResult = kinesisClient.putRecords(request);
-            failure = !failure && putRecordsResult.getFailedRecordCount() == 0;
-            logger.log("Status of put records : " + (putRecordsResult.getFailedRecordCount()));
+            putRecordsResult = kinesisClient.putRecords(request);
+            boolean failure = putRecordsResult.getFailedRecordCount() > 0;
+            logger.log("Status of put records : " + failure + (putRecordsResult.getFailedRecordCount()));
+            if (failure) {
+                handleFailedRecords(streamName, putRecordsResult, entries);
+            }
         } catch (Exception e) {
-            logger.log("Failed to send data: " + e.getMessage());
+            logger.log("Failed to send data: " + e.getStackTrace());
+        }
+        return putRecordsResult;
+    }
+
+    private void handleFailedRecords(String streamName, PutRecordsResult putRecordsResult, List<PutRecordsRequestEntry> putRecordsRequestEntryList) {
+
+        while (putRecordsResult.getFailedRecordCount() > 0) {
+            final List<PutRecordsRequestEntry> failedRecordsList = new ArrayList<>();
+            final List<PutRecordsResultEntry> putRecordsResultEntryList = putRecordsResult.getRecords();
+            for (int i = 0; i < putRecordsResultEntryList.size(); i++) {
+                final PutRecordsRequestEntry putRecordRequestEntry = putRecordsRequestEntryList.get(i);
+                final PutRecordsResultEntry putRecordsResultEntry = putRecordsResultEntryList.get(i);
+                if (putRecordsResultEntry.getErrorCode() != null) {
+                    failedRecordsList.add(putRecordRequestEntry);
+                }
+            }
+            putRecordsRequestEntryList = failedRecordsList;
+            logger.log("Handling failed Records");
+            putRecordsResult = executeRequest(streamName, putRecordsRequestEntryList);
+            logger.log("Failed records this time are " + putRecordsResult.getFailedRecordCount());
+
         }
     }
 
     private PutRecordsRequestEntry createPutRecordsRequestEntry(String line, String partitionValue) {
         PutRecordsRequestEntry requestEntry = new PutRecordsRequestEntry();
-        requestEntry.setPartitionKey(partitionValue);
+        requestEntry.setPartitionKey("partitionID" + partitionValue);
         requestEntry.withData(ByteBuffer.wrap(line.getBytes()));
         return requestEntry;
     }
