@@ -91,16 +91,9 @@ public class S3EventToKinesisHandler implements RequestHandler<S3Event, String> 
             }));
 
             logger.log("Read from bucket: " + bucketName + " and file: " + fileName);
-            try {
-                processS3(partitionKey, bucketName, fileName);
-                kinesisWrite();
-                service.shutdown();
-            /*while (service.isTerminated()) {
-                Thread.sleep(1000);
-            }*/
-            } catch (Exception e) {
-                //service.shutdownNow();
-            }
+            processS3(partitionKey, bucketName, fileName);
+            kinesisWrite();
+            service.shutdown();
         } catch (Exception e) {
             logger.log(Arrays.deepToString(e.getStackTrace()));
         }
@@ -139,37 +132,25 @@ public class S3EventToKinesisHandler implements RequestHandler<S3Event, String> 
 
     private void kinesisWrite() throws InterruptedException {
         String streamName = properties.getProperty("app.stream.name");
-        long startTime = System.currentTimeMillis();
-        int callPerSecond = 2;
+        double executionPerSecond = Double.parseDouble(properties.getProperty("app.execute.per.second"));
 
         logger.log("in async job");
         int batchSize = Integer.parseInt(properties.getProperty("app.batch.size", "100"));
         List<PutRecordsRequestEntry> entries = new ArrayList<>();
 
-        RateLimiter rateLimiter = RateLimiter.create(8.0);
-        rateLimiter.setRate(8.0);
-        int counter = 1;
+        RateLimiter rateLimiter = RateLimiter.create(executionPerSecond);
+        rateLimiter.setRate(executionPerSecond);
         while (!done || !queue.isEmpty()) {
-          //  long diff = (System.currentTimeMillis() - startTime) / 1000;
             PutRecordsRequestEntry requestEntry = queue.take();
             entries.add(requestEntry);
             if (entries.size() >= batchSize) {
-                /*if (diff > 1 || counter <= callPerSecond) {
-                    executeRequest(streamName, entries);
-                    entries.clear();
-                    counter++;
-                } else {
-                    Thread.sleep(1000);
-                    counter = 1;
-                }
-                startTime = System.currentTimeMillis();*/
                 rateLimiter.acquire(1);
                 executeRequest(streamName, entries);
                 entries.clear();
                 logger.log("put records job submitted");
             }
         }
-        logger.log("its not coming here");
+        logger.log("executes remaining records");
 
         if (!entries.isEmpty()) {
             executeRequest(streamName, entries);
@@ -201,5 +182,3 @@ public class S3EventToKinesisHandler implements RequestHandler<S3Event, String> 
         return requestEntry;
     }
 }
-
-//https://s3.amazonaws.com/practice-lambda-jar/lambda-hello-1.0-SNAPSHOT.jar
