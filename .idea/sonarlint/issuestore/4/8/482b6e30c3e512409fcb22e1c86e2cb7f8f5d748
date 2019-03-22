@@ -1,0 +1,10 @@
+
+lsquid:CommentedOutCodeLine"<This block of commented-out lines of code should be removed.(£ÖÂÝþÿÿÿÿ8è·‡š-
+Qsquid:S1068"5Remove this unused "asyncJobSubmitted" private field.(Í”8è·‡š-
+gsquid:CommentedOutCodeLine"<This block of commented-out lines of code should be removed.(«¿Å¹8è·‡š-
+gsquid:CommentedOutCodeLine"<This block of commented-out lines of code should be removed.(ÎÎˆó8è·‡š-
+gsquid:CommentedOutCodeLine"<This block of commented-out lines of code should be removed.(¬ù¡Ã8è·‡š-
+Dsquid:S1068"(Remove this unused "done" private field.(°ž’÷8è·‡š-
+Lsquid:S1068"+Remove this unused "service" private field.(üÞžýÿÿÿÿ8è·‡š-
+osquid:S1450"SRemove the "done" field and declare it as a local variable in the relevant methods.(°ž’÷8è·‡š-
+lsquid:CommentedOutCodeLine"<This block of commented-out lines of code should be removed.(ÿÃÏùÿÿÿÿ8è·‡š-

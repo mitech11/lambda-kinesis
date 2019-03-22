@@ -1,0 +1,6 @@
+com/practice/lambda/model/Greet.class
+com/practice/lambda/S3EventToKinesisHandler.class
+com/practice/lambda/S3EventHandler.class
+com/practice/lambda/Hello.class
+com/practice/lambda/Temp.class
+com/practice/lambda/S3EventToKinesisHandler$1.class
